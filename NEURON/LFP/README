@@ -1,0 +1,42 @@
+Neuron demo file to simulate local field potentials
+---------------------------------------------------
+
+This Neuron demo file simulates the model of local field potentials
+(LFP) with variable resistivity, as described in the following paper:
+
+ Bedard C, Kroger H and Destexhe A.  Modeling extracellular field
+ potentials and the frequency-filtering properties of extracellular
+ space.  Biophysical Journal 86: 1829-1842, 2004.
+
+This paper develops a model of LFP that includes the frequency
+filtering properties of extracellular space.  The paper considers
+inhomogeneous conductivity and permittivity profiles, which results
+from the multiple media (fluids, membranes, vessels, ...) composing
+the extracellular space around neurons.  Including non-constant
+profiles of conductivity enables the model to display frequency
+filtering properties, ie slow events such as EPSPs/IPSPs are less
+attenuated than fast events such as action potentials.
+
+The model shown here is a reproduction of Figure 6 of the paper. 
+The source current is monopolar in this simple case and consists of
+an EPSP/IPSP sequence followed by an action potential (see details
+in the paper).
+
+The method to calculate the extracellular LFP consists of the 
+following steps:
+	  - read in the source current I from a data file
+	  - compute the Fourier transform of the source current I
+	  - compute the impedance Z assuming a non-homogeneous conductivity
+	    function (radial symetry) - this step requires a MOD file
+	    with the ImpedanceFM mechanism
+	  - compute the extracellular voltage by inverse Fourier transform
+	    of the product Z(w) * I(w)
+
+Note that this demo file is provided "as is", unfortunately I have
+no time to help implementing, but feedbacks are always welcome if
+it has been useful to you.  If you use this for your research,
+please cite the above paper.
+
+Alain Destexhe, 
+CNRS, Gif sur Yvette, France
+http://cns.iaf.cnrs-gif.fr

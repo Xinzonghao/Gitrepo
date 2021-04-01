@@ -1,0 +1,372 @@
+/*----------------------------------------------------------------------------
+
+	Neuron demo file to simulate local field potentials
+        ---------------------------------------------------
+	
+        Model: simple EPSP/IPSP model with two synaptic currents,
+	(monopolar current source) => Read data file with source current
+
+        Method: calculate the extracellular field potentials based on
+        inhomogeneous conductivity in extracellular space in radial symetry
+	(Bedard, Kroger & Destexhe model)
+
+	  - compute the Fourier transform of the source current I
+          - compute the impedance Z assuming a non-homogeneous conductivity
+            function (radial symetry) - MECHANISM IN MOD FILE
+          - compute the extracellular voltage by inverse Fourier transform
+            of the product Z(w) * I(w)
+
+	THIS FILE: simulates fig 6 of the paper
+
+        For details, see:
+
+        Bedard C, Kroger H & Destexhe A.  Modeling extracellular field 
+        potentials and the frequency-filtering properties of extracellular 
+        space.  Biophysical Journal 86: 1829-1842, 2004.
+
+
+        Written by A. Destexhe, 2002
+	http://cns.iaf.cnrs-gif.fr
+
+----------------------------------------------------------------------------*/
+
+
+/*-------------------------------------------------------------------------
+
+ NOTE ON UNITS: 
+ 
+ Fourier transform of current: 
+  I(w) = INT dt exp(-iwt) I(t)
+  (A-s) =   (s)  (none)   (A) 
+  (nA-s) =  (s)  (none)   (nA)
+		=> units of nA-s (otherwise too small numbers)
+		=> time in seconds, frequency in Hz
+ 
+ Fourier transform of voltage: 
+  V(w) = Z(w) I(w)
+  (V-s) = (Ohm) (A-s)
+		=> Z(w) must be in units of Ohm (and not Ohm-s)
+ 
+ Fourier transform of impedance:
+  Z(w)  = 1 / (4pi sigmaR) INT dr/r^2 (sigR-iw epsR)/(sig(r)-iw eps(r))
+  (Ohm) = 1 / (S/m)          (m)/(m^2)   (none)
+  (Ohm) = 1 / (S/m)          (1/m)
+  (Ohm) = 1 / (S/um)         (1/um)
+		=> distances can be specified in microns, if sigmaR in S/um
+		=> impedance in Ohm
+	
+ Inverse Fourier transform of voltage:
+  Vext = INT dw exp(iwt) [Z(w) I(w)]
+  (V)  =    1/s  (none)  (Ohm A s = V-s)
+  (nV) =    1/s  (none)  (Ohm nA-s = nV-s)
+ 
+ => all frequencies in Hz, time in seconds, current in nA
+ => extracellular voltage in nV
+
+ (see other notes labeled by "UNITS" below)
+    
+-------------------------------------------------------------------------*/
+
+
+
+//----------------------------------------------------------------------------
+//  load and define general graphical procedures
+//----------------------------------------------------------------------------
+
+xopen("$(NEURONHOME)/lib/hoc/stdrun.hoc")
+
+objectvar g[20]			// max 20 graphs
+ngraph = 0
+
+proc addgraph() { local ii	// define subroutine to add a new graph
+				// addgraph("variable", minvalue, maxvalue)
+	ngraph = ngraph+1
+	ii = ngraph-1
+	g[ii] = new Graph()
+	g[ii].size(0,tstop,$2,$3)
+	g[ii].xaxis()
+	g[ii].yaxis()
+	g[ii].addvar($s1,1,0)
+	g[ii].save_name("graphList[0].")
+	graphList[0].append(g[ii])
+}
+
+proc makegraph() { local ii	// define subroutine to add a new graph
+				// makeraph("variable", xmin,xmax,ymin,ymax)
+	ngraph = ngraph+1
+	ii = ngraph-1
+	g[ii] = new Graph()
+	g[ii].size($2,$3,$4,$5)
+	g[ii].xaxis()
+	g[ii].yaxis()
+	g[ii].addvar($s1,1,0)
+	g[ii].save_name("graphList[0].")
+	graphList[0].append(g[ii])
+}
+
+nrnmainmenu()			// create main menu
+nrncontrolmenu()		// crate control menu
+
+
+
+//----------------------------------------------------------------------------
+// Read in data points of source current
+//----------------------------------------------------------------------------
+
+ropen("curr.dat")	// source current of EPSP/spike model
+
+npoints = fscan()	// nb points should be an exponent of 2
+dt=fscan()
+
+objectvar Curr		// create vectors of data points
+Curr = new Vector(npoints)
+
+for i=0,npoints-1 { 	// read source currents
+ Curr.set(i, fscan() )
+}
+
+
+//----------------------------------------------------------------------------
+//  create graphs
+//----------------------------------------------------------------------------
+
+
+tmaxdraw = 10           // set time max to draw
+
+objectvar gI		// create graph for membrane current
+gI = new Graph()
+gI.xaxis()
+gI.yaxis()
+gI.label("Im (nA)") 
+
+proc draw_Imem() {     // draw membrane current
+  gI.beginline(1,1)
+  for i=0, npoints-1 {
+    if(i*dt <= tmaxdraw) {
+        gI.line( i*dt, Curr.get(i))
+    }
+  }
+  gI.size(0, tmaxdraw, Curr.min(), Curr.max())
+}
+
+
+
+//----------------------------------------------------------------------------
+//  Calculate and store the impedance
+//----------------------------------------------------------------------------
+
+// UNITS: compute the impedance in Ohm
+
+npt = npoints/2			// nb of points in frequency 
+df = 1000/(npoints*dt)		// freq interval in Hz
+fmax = df*npt			// max frequency in Hz
+
+R = 105				// radius of source (UNITS: um)
+rext = 500			// distance of the recording electrode (um)
+rmax = 200*R			// max distance for integration (um)
+dr = rmax/1000                  // integration step (um)
+
+lambda = 500			// space cst. of conductivity decay (UNITS=um)
+sigma1 = 1			// high-amplitude of conductivity (normalized)
+sigma2 = 0.2			// low-amplitude of conductivity (normalized)
+				// (this is the asymptotic value, macroscopic)
+sigma2 = 2e-9			// low-amplitude of conductivity (normalized)
+				// (this is the minimal value, membranes)
+epsilon1 = 6e-11  		// value of permittivity (constant, normalized)
+
+sigmaR = 1.56			// absolute value of conductivity at the source
+                                // UNITS: S/m
+sigmaR = sigmaR * 1e-6          // converted to UNITS of S/um so that distances
+				// can be specified in um
+
+epsilon1 = 0.0001  // heuristic
+
+
+
+create soma		// create fake compartment for impedance
+access soma
+objref C
+C = new ImpedanceFM(0.5)	// create object that will contain the C code
+soma C.loc(0.5)		// locate the object in the compartment
+
+double Zr[npt+1],Zi[npt+1]
+setpointer C.vec1, Zr[0]	// assign pointers to vectors
+setpointer C.vec2, Zi[0]
+
+
+//
+// Calculate filter:
+//  loop over frequencies -> calculate impedances -> store in vectors
+//
+proc calc_filter() {
+  C.impedance(fmax,df,rext,rmax,dr,R,sigma1,sigma2,lambda,epsilon1,sigmaR)
+  draw_filter()
+}
+
+objectvar g1		// draw |Z| vs frequency
+g1 = new Graph()
+g1.xaxis()
+g1.yaxis()
+g1.label("|Z|") 
+
+fmaxdraw = 2000		// max frequency to draw
+
+proc draw_filter() {
+  g1.beginline(1,1)
+  i=0
+  zmax=0
+  for(f=df; f<=fmaxdraw; f=f+df) {			// draw impedance
+        ReZ = Zr[i]
+        ImZ = Zi[i]
+        z = sqrt(ReZ*ReZ+ImZ*ImZ)               // norm of impedance
+	if(z>zmax) zmax=z
+	g1.line(f, z)
+        i=i+1
+  }
+  g1.size(0,fmaxdraw,0,zmax)
+}
+
+
+
+
+//----------------------------------------------------------------------------
+//  Procedures to calculate FFT (from Vector objects)
+//----------------------------------------------------------------------------
+
+// UNITS: current in nA => FFT (Ir,Ii) will be in nA-s
+
+objref Ir, Ii, Vr, Vi, Vext		// create vectors
+Ir = new Vector(npt+1)		// Fourier transform of the current
+Ii = new Vector(npt+1)
+Vr = new Vector(npt+1)		// Fourier transform of extracellular voltage
+Vi = new Vector(npt+1)
+Vext = new Vector(npoints)      // Extracellular voltage
+
+objref RFT			// Vector for FFT
+RFT = new Vector(npoints)
+
+// fft function from Vector in ivoc:
+// The "fft" function is taken from the "realft" procedure from Numerical
+// Recipes (Press, W.H., Flannery, B.P., Teukolsky, S.A. and Vetterling, W.T. 
+// Numerical Recipes. The Art of Scientific Computing. Cambridge University
+// Press, 1986).  It inputs a real data vector of N points (N must be exponent
+// of 2) and returns the half of its Fourier transform (the other half being
+// symetric), as complex numbers.  The first and second points returned are
+// the first and last real-valued points of the FFT.  The other points are
+// returned as couples of real/complex values.  The frequency interval is 
+// delta-f = 1/(N*dt).  To yield the correct amplitudes of the FT, all real
+// (cosine) and complex (sine) transforms must be divided by (N/2), except the 
+// first and second points returned which must be divided by N.
+// Inverse Fourier transform: use fft with second argument of "-1".
+
+
+//
+//  Procedure to calculate FFT of source current
+//
+proc runfft() {
+   draw_Imem()				// draw source current
+   RFT.fft(Curr)			// calculate FFT of current
+   for(i=0; i<npt; i=i+1) {     	// decompose real/complex components
+        Ir.set(i, RFT.get(2*i)/npt )	// store into Ir, Ii
+        Ii.set(i, RFT.get(2*i+1)/npt )
+   }
+   Ir.set(npt, RFT.get(1)/npt)		// last real component is 2nd pt of FFT
+   Ii.set(0, 0)				// first complex component set to zero
+   Ii.set(npt, 0)			// last complex component set to zero
+   draw_fft()
+}
+
+
+objectvar g2		// create graph for Power Spectrum
+g2 = new Graph()
+g2.xaxis()
+g2.yaxis()
+g2.label("Power") 
+
+proc draw_fft() {       // draw power spectrum of current
+  g2.beginline(1,1)
+  pmax=0
+  for i=0,npt {
+    if(i*df<=fmaxdraw) {
+        pow = Ir.get(i)^2 + Ii.get(i)^2
+	if(pow > pmax) pmax=pow
+        g2.line(i*df, pow)
+    }
+  }
+  g2.size(0, fmaxdraw, 0, pmax)
+}
+
+
+
+//
+//  Procedure to calculate extracellular voltage at a given distance
+//  (assumes that Ir, Ii contains the Re/Im values of current; UNITS nA-s)
+//  (assumes that Zr, Zi contains the Re/Im values of impedance; UNITS Ohm)
+//
+proc calc_extracellular() {
+   for i=0, npt {		// compute the product (Zr,Zi)*(Ir,Ii)
+	a = Zr[i]*Ir.get(i) - Zi[i]*Ii.get(i)
+        b = Zr[i]*Ii.get(i) + Zi[i]*Ir.get(i)
+        Vr.set(i, a)		// store in Vr, Vi (w-freq component of Vext)
+        Vi.set(i, b)            // (UNITS: nV-s)
+   }
+   for i=0, npt-1 {		// store into RFT vector for inverse FFT
+        RFT.set(2*i, Vr.get(i) )
+        RFT.set(2*i+1, Vi.get(i) )
+   }
+   RFT.set(1, Vr.get(npt) )     // 2nd point is last real component
+
+   RFT.set(0, 0 )		// remove dc (nonzero dc is due to num error)
+
+   Vext.fft(RFT,-1)             // compute inverse FFT and store into Vext
+                                // Vext is the extracellular voltage (UNITS nV)
+   draw_extracellular()
+}
+
+
+objectvar g3		// create graph for Vext
+g3 = new Graph()
+g3.xaxis()
+g3.yaxis()
+g3.label("Vext (mV)") 
+
+proc draw_extracellular() {     // draw extracellular V (UNITS converted to mV) 
+  g3.beginline(1,1)
+  for i=0, npoints-1 {
+    if(i*dt <= tmaxdraw) {
+        g3.line( i*dt, Vext.get(i) * 1e-6 )
+    }
+  }
+  g3.size(0, tmaxdraw, Vext.min()*1e-6, Vext.max()*1e-6)
+}
+
+
+
+//----------------------------------------------------------------------------
+//  Create command panel
+//----------------------------------------------------------------------------
+
+proc draw_panel() {
+	xpanel("Calculate extracellular field potentials")
+	xpvalue("Position of electrode (um)",&rext)
+	xpvalue("Max distance for integration",&rmax)
+	xpvalue("Integration step",&dr)
+	xpvalue("Spatial decay of conductivity",&lambda)
+	xpvalue("Minimal conductivity (normalized)",&sigma2)
+	xpvalue("Conductivity at the source (absolute)",&sigmaR)
+	xpvalue("Value of permittivity (normalized)",&epsilon1)
+	xbutton("=> 1. Calculate impedances","calc_filter()")
+	xbutton(" => Redraw impedances","draw_filter()")
+	xbutton("=> 2. Calculate current FFT","runfft()")
+	xbutton(" => Redraw FFT","draw_fft()")
+	xbutton("=> 3. Calculate extracellular potential","calc_extracellular()")
+        xbutton(" => Redraw extracellular potential","draw_extracellular()")
+	xpvalue("Max frequency to draw",&fmaxdraw)
+	xpvalue("Max time to draw",&tmaxdraw)
+	xpanel()
+}
+
+draw_panel()
+
+
+
